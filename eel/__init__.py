@@ -13,7 +13,7 @@ import random as rnd
 import sys
 import pkg_resources as pkg
 import socket
-
+TIME_OUT = 10  # seconds
 _eel_js_file = pkg.resource_filename('eel', 'eel.js')
 _eel_js = open(_eel_js_file, encoding='utf-8').read()
 _websockets = []
@@ -126,6 +126,9 @@ def start(*start_urls, **kwargs):
 def sleep(seconds):
     gvt.sleep(seconds)
 
+def set_timeout(timeout):
+    global TIME_OUT
+    TIME_OUT = timeout
 
 def spawn(function, *args, **kwargs):
     gvt.spawn(function, *args, **kwargs)
@@ -193,9 +196,18 @@ def _process_message(message, ws):
                                         'value': return_val    })) 
     elif 'return' in message:
         call_id = message['return']
+        generator = "continue" in message.keys()
+        docontinue = generator and message["continue"]!=False
         if call_id in _call_return_callbacks:
-            callback = _call_return_callbacks.pop(call_id)
-            callback(message['value'])
+            if not docontinue:
+                callback = _call_return_callbacks.pop(call_id)
+                if not generator:
+                    # the last value of a generator is None
+                    # and should not be sent back 
+                    callback(message["value"])
+            else:
+                callback = _call_return_callbacks[call_id]
+                callback(message['value'])
         else:
             _call_return_values[call_id] = message['value']
     else:
@@ -210,10 +222,17 @@ def _get_real_path(path):
 
 
 def _mock_js_function(f):
+    # f = f.split(',')[0],
+    # allow to use eel.expose(func, name) in js and only take func
+    # this is fix commented out because a better solution has been found, cf current commit eel.js
+
     exec('%s = lambda *args: _mock_call("%s", args)' % (f, f), globals())
 
 
 def _import_js_function(f):
+    # f = f.split(',')[0]
+    # allow to use eel.expose(func, name) in js and only take func
+    # this is fix commented out because a better solution has been found, cf current commit eel.js
     exec('%s = lambda *args: _js_call("%s", args)' % (f, f), globals())
 
 
@@ -245,10 +264,15 @@ def _call_return(call):
         if callback is not None:
             _call_return_callbacks[call_id] = callback
         else:
-            for w in range(10000):
+            index = 0
+            while True:
                 if call_id in _call_return_values:
                     return _call_return_values.pop(call_id)
                 sleep(0.001)
+                index += 0.001
+                if index >= TIME_OUT:
+                    print("time out")
+                    break
     return return_func
 
 

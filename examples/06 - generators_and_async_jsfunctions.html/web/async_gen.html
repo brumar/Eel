@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Hello, World!</title>
+        
+        <!-- Include eel.js - note this file doesn't exist in the 'web' directory -->
+        <script type="text/javascript" src="/eel.js"></script>
+        <script type="text/javascript">
+        
+        eel.expose(async_say_hello_js);               // Expose an async function to Python
+        async function async_say_hello_js(x) {
+            console.log("Hello from " + x);
+            return "well received dear backend"
+        }
+        
+        eel.expose(mygenerator);               // Expose a generator to Python
+        function* mygenerator(x) {
+        	count = 0
+        	while (count < 10){
+        		count ++;
+        		yield count;
+        	}
+        }
+
+        </script>
+    </head>
+    
+    <body>
+        Hello, World!
+    </body>
+</html>

@@ -6,13 +6,26 @@ eel = {
     },
 
     expose: function(f, name) {
-        if(name === undefined){
-            name = f.toString();
-            let i = 'function '.length, j = name.indexOf('(');
-            name = name.substring(i, j).trim();
-        }
 
-        eel._exposed_functions[name] = f;
+        name = f.name;
+        // Note :  function* (js generators) must be supported in order to avoid problem with this fix
+        if(name === undefined){
+            fullname = f.toString();
+            const regex = /function\s+(\w+)\(/;
+            // this regexp supports async function declaration
+            if ((m = regex.exec(fullname)) !== null) {
+                if (m[1] !== undefined){
+                    name = m[1]
+                }
+	        }
+        }
+        if (name==undefined){
+            //stil undefined even after parsing
+            console.log("this function can't be exposed : " +fullname)
+        }
+        else{
+            eel._exposed_functions[name] = f;
+        }
     },
 
     // These get dynamically added by library when file is served
@@ -123,17 +136,33 @@ eel = {
                 if(message.hasOwnProperty('call') ) {
                     // Python making a function call into us
                     if(message.name in eel._exposed_functions) {
-                        let return_val = eel._exposed_functions[message.name](...message.args);
-                        eel._websocket.send(eel._toJSON({'return': message.call, 'value': return_val}));
+                        let return_val_or_promise_or_generator = eel._exposed_functions[message.name](...message.args);
+                            if (return_val_or_promise_or_generator.next !== undefined){
+                                // this is a generator
+                                it = return_val_or_promise_or_generator
+                                let previous_result = it.next();
+                                while (!previous_result.done) {
+                                    result = it.next();
+                                    eel._websocket.send(eel._toJSON({'return': message.call, 'value': previous_result.value, 'continue':true}));
+                                    previous_result = result
+                                    }
+                                    eel._websocket.send(eel._toJSON({'return': message.call, 'value': previous_result.value, 'continue':false}));
+                            }
+                            else{
+                                return_val_or_promise = return_val_or_promise_or_generator
+                                Promise.resolve(return_val_or_promise).then(function(value) {
+                                    eel._websocket.send(eel._toJSON({'return': message.call, 'value': value}));
+                                })
+                            }
+                        }
+                    } else if(message.hasOwnProperty('return')) {
+                        // Python returning a value to us
+                        if(message['return'] in eel._call_return_callbacks) {
+                            eel._call_return_callbacks[message['return']](message.value);
+                        }
+                    } else {
+                        throw 'Invalid message ' + message;
                     }
-                } else if(message.hasOwnProperty('return')) {
-                    // Python returning a value to us
-                    if(message['return'] in eel._call_return_callbacks) {
-                        eel._call_return_callbacks[message['return']](message.value);
-                    }
-                } else {
-                    throw 'Invalid message ' + message;
-                }
 
             };
         });
