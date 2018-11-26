@@ -62,7 +62,7 @@ def init(path):
     js_functions = set()
     for root, _, files in os.walk(root_path):
         for name in files:
-            allowed_extensions = '.js .html .txt .htm .xhtml'.split()
+            allowed_extensions = '.js .html .txt .htm .xhtml scrypt.py'.split()
             if not any(name.endswith(ext) for ext in allowed_extensions):
                 continue
 
