@@ -95,6 +95,7 @@ def start(*start_urls, **kwargs):
     position = kwargs.pop('position', None)
     geometry = kwargs.pop('geometry', {})
     _on_close_callback = kwargs.pop('callback', None)
+    bottle_already_started = kwargs.pop('alive', False)
 
     for k, v in list(_default_options.items()):
         if k not in options:
@@ -108,19 +109,19 @@ def start(*start_urls, **kwargs):
         sock.bind(('localhost', 0))
         options['port'] = sock.getsockname()[1]
         sock.close()
-
-    brw.open(start_urls, options)
     
-    def run_lambda():
-        return btl.run(
-            host=options['host'],
-            port=options['port'],
-            server=wbs.GeventWebSocketServer,
-            quiet=True)
-    if block:
-        run_lambda()
-    else:
-        spawn(run_lambda)
+    if not bottle_already_started:
+        brw.open(start_urls, options)
+        def run_lambda():
+            return btl.run(
+                host=options['host'],
+                port=options['port'],
+                server=wbs.GeventWebSocketServer,
+                quiet=True)
+        if block:
+            run_lambda()
+        else:
+            spawn(run_lambda)
 
 
 def sleep(seconds):
@@ -283,6 +284,7 @@ def _expose(name, function):
 
 
 def _websocket_close(page):
+    print("close detected")
     if _on_close_callback is not None:
         sockets = [p for _, p in _websockets]
         _on_close_callback(page, sockets)
@@ -290,4 +292,3 @@ def _websocket_close(page):
         sleep(1.0)
         if len(_websockets) == 0:
             sys.exit()
-
