@@ -137,6 +137,7 @@ eel = {
                     // Python making a function call into us
                     if(message.name in eel._exposed_functions) {
                         let return_val_or_promise_or_generator = eel._exposed_functions[message.name](...message.args);
+			if (return_val_or_promise_or_generator !== undefined){
                             if (return_val_or_promise_or_generator.next !== undefined){
                                 // this is a generator
                                 it = return_val_or_promise_or_generator
@@ -152,7 +153,8 @@ eel = {
                                 return_val_or_promise = return_val_or_promise_or_generator
                                 Promise.resolve(return_val_or_promise).then(function(value) {
                                     eel._websocket.send(eel._toJSON({'return': message.call, 'value': value}));
-                                })
+                                    })
+				}
                             }
                         }
                     } else if(message.hasOwnProperty('return')) {
