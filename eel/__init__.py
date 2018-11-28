@@ -14,6 +14,9 @@ import sys
 import pkg_resources as pkg
 import socket
 import contextlib
+import importlib
+import pkgutil
+from collections import defaultdict
 
 TIME_OUT = 10  # seconds
 _eel_js_file = pkg.resource_filename('eel', 'eel.js')
@@ -35,8 +38,44 @@ _default_options = {
     'port': 8000,
     'chromeFlags': []
 }
+frontend_modules = defaultdict(set)
+
+BACKEND_NAMES = []
+FRONTEND_FILES = []
+
 import contextlib
 import builtins
+
+
+import re
+
+
+def notcommented(line):
+    for car in line:
+        if car == "#":
+            return False
+        if not car.isspace():
+            return True
+
+
+
+def find_exposed_transcrypt_functions(filepath, caller):
+    regex = caller+"\.([^(]+)\("
+    with open(filepath, "r") as f:
+        vlist = [line.strip() for line in f if notcommented(line)]
+        for match in re.finditer(regex, "".join(vlist), re.MULTILINE):
+            function_name = match.group(1)
+            expose(function_name)
+
+
+def search_in_import(strval):
+    l = pkgutil.get_loader("web.frontendscrypt")
+    return l.path
+
+
+def add_to_callers(caller, strval):
+    frontend_modules[strval].add(caller)
+
 
 
 # Public functions
@@ -87,35 +126,75 @@ def expose(name_or_function=None):
         return function
 
 
-def init(path, search_exposed_js=True):
+def init(path, search_exposed_js=True, search_into_imports=False):
     global root_path
     root_path = path
     if search_exposed_js:
-        js_functions = set()
-        for root, _, files in os.walk(root_path):
-            for name in files:
-                allowed_extensions = '.js .html .txt .htm .xhtml'.split()
-                if not any(name.endswith(ext) for ext in allowed_extensions):
-                    continue
-            
-                try:
-                    with open(os.path.join(root, name), encoding='utf-8') as file:
-                        contents = file.read()
-                        expose_calls = set()
-                        finder = rgx.findall(r'eel\.expose\((.*)\)', contents)
-                        for expose_call in finder:
-                            expose_call = expose_call.strip()
-                            msg = "eel.expose() call contains '(' or '='"
-                            assert rgx.findall(
-                                r'[\(=]', expose_call) == [], msg
-                            expose_calls.add(expose_call)
-                        js_functions.update(expose_calls)
-                except UnicodeDecodeError:
-                    pass  # Malformed file probably
+        js_functions = search_in_static_files(root_path)
     
         _js_functions = list(js_functions)
         for js_function in _js_functions:
             _mock_js_function(js_function)
+    if search_into_imports:
+        for frontend_module, callers_set in frontend_modules.items():
+            module_filepath = search_in_import(frontend_module)
+            for caller in callers_set:
+                find_exposed_transcrypt_functions(module_filepath, caller=caller)
+            
+    
+def register_backend_names(listofnames):
+    global BACKENDNAMES
+    BACKENDNAMES = listofnames
+
+def register_frontend_js_files(filepathlist):
+    global FRONTEND_FILES
+    FRONTEND_FILES = filepathlist
+
+
+def build_autobridgejs():
+    lines = []
+    for backend_name in BACKENDNAMES:
+        lines.append(f"window.{backend_name} = eel;")
+    for frontfilepath in FRONTEND_FILES:
+        if frontfilepath.startswith("./web"):
+            frontfilepath = frontfilepath.replace("./web", "./")
+        if frontfilepath.startswith("/web"):
+            frontfilepath = frontfilepath.replace("/web", "./")
+        if frontfilepath.startswith("web"):
+            frontfilepath = frontfilepath.replace("web/", "./")
+        module_name = frontfilepath.split("/")[-1].split(".")[0]
+        lines.append(f"import * as {module_name} from '{frontfilepath}';")
+        lines.append(f"window.{module_name} = {module_name};")
+        lines.append(f"var functions = Object.keys({module_name})")
+        lines.append("for (var i=0; i < functions.length; i++){")
+        lines.append(f"eel.expose({module_name}[functions[i]], functions[i]);")
+        lines.append("}")
+    return "\r\n".join(lines)
+        
+    
+def search_in_static_files(root_path):
+    js_functions = set()
+    for root, _, files in os.walk(root_path):
+        for name in files:
+            allowed_extensions = '.js .html .txt .htm .xhtml'.split()
+            if not any(name.endswith(ext) for ext in allowed_extensions):
+                continue
+            
+            try:
+                with open(os.path.join(root, name), encoding='utf-8') as file:
+                    contents = file.read()
+                    expose_calls = set()
+                    finder = rgx.findall(r'eel\.expose\((.*)\)', contents)
+                    for expose_call in finder:
+                        expose_call = expose_call.strip()
+                        msg = "eel.expose() call contains '(' or '='"
+                        assert rgx.findall(
+                            r'[\(=]', expose_call) == [], msg
+                        expose_calls.add(expose_call)
+                    js_functions.update(expose_calls)
+            except UnicodeDecodeError:
+                pass  # Malformed file probably
+    return js_functions
 
 
 def start(*start_urls, **kwargs):
@@ -175,6 +254,12 @@ def _eel():
                            '_py_functions: %s,' % funcs)
     page = page.replace('/** _start_geometry **/',
                         '_start_geometry: %s,' % jsn.dumps(_start_geometry))
+    btl.response.content_type = 'application/javascript'
+    return page
+
+@btl.route('/autobridge.js')
+def _eel():
+    page = build_autobridgejs()
     btl.response.content_type = 'application/javascript'
     return page
 
@@ -277,6 +362,8 @@ def _call_object(name, args):
 
 
 def _mock_call(name, args):
+    #print("mock call")
+    #print(name, args)
     call_object = _call_object(name, args)
     global _mock_queue
     _mock_queue += [call_object]
@@ -284,6 +371,8 @@ def _mock_call(name, args):
 
 
 def _js_call(name, args):
+    #print("js call")
+    #print(name, args)
     call_object = _call_object(name, args)
     for _, ws in _websockets:
         _repeated_send(ws, jsn.dumps(call_object))
@@ -316,6 +405,7 @@ def _expose(name, function):
 
 
 def _websocket_close(page):
+    print("close detected")
     if _on_close_callback is not None:
         sockets = [p for _, p in _websockets]
         _on_close_callback(page, sockets)
@@ -323,4 +413,3 @@ def _websocket_close(page):
         sleep(1.0)
         if len(_websockets) == 0:
             sys.exit()
-
