@@ -13,6 +13,8 @@ import random as rnd
 import sys
 import pkg_resources as pkg
 import socket
+import contextlib
+
 TIME_OUT = 10  # seconds
 _eel_js_file = pkg.resource_filename('eel', 'eel.js')
 _eel_js = open(_eel_js_file, encoding='utf-8').read()
@@ -33,9 +35,39 @@ _default_options = {
     'port': 8000,
     'chromeFlags': []
 }
+import contextlib
+import builtins
 
 
 # Public functions
+def new_import(old_import):
+    def new_new_import(strval, globs, locs, alist, anumber):
+        for imported_function in alist:
+            _mock_js_function(imported_function)
+            def func1(*args):
+                return _js_call(imported_function, args)
+            func1.__name__ = imported_function
+            setattr(sys.modules[__name__], imported_function, func1)
+            _js_functions.append(imported_function)
+        return old_import("eel", globs, locs, alist, anumber)
+    return new_new_import
+
+
+
+@contextlib.contextmanager
+def import_frontend_functions():
+    """
+    - Patch the python import mechanism so that front end python functions are not really imported
+    - Preserves exposing mechanism internal to eel, so that it can continue to communicate with js
+    - Imports the function name into the namespace of the caller, so that my_function() can be directly called
+    """
+    global pre_patched_value
+    pre_patched_value = builtins.__import__
+    builtins.__import__ = new_import(pre_patched_value)
+    yield "done"
+    builtins.__import__ = pre_patched_value
+    import_frontend_functions
+
 
 def expose(name_or_function=None):
     # Deal with '@eel.expose()' - treat as '@eel.expose'
@@ -55,35 +87,35 @@ def expose(name_or_function=None):
         return function
 
 
-def init(path):
-    global root_path, _js_functions
-    root_path = _get_real_path(path)
-
-    js_functions = set()
-    for root, _, files in os.walk(root_path):
-        for name in files:
-            allowed_extensions = '.js .html .txt .htm .xhtml scrypt.py'.split()
-            if not any(name.endswith(ext) for ext in allowed_extensions):
-                continue
-
-            try:
-                with open(os.path.join(root, name), encoding='utf-8') as file:
-                    contents = file.read()
-                    expose_calls = set()
-                    finder = rgx.findall(r'eel\.expose\((.*)\)', contents)
-                    for expose_call in finder:
-                        expose_call = expose_call.strip()
-                        msg = "eel.expose() call contains '(' or '='"
-                        assert rgx.findall(
-                            r'[\(=]', expose_call) == [], msg
-                        expose_calls.add(expose_call)
-                    js_functions.update(expose_calls)
-            except UnicodeDecodeError:
-                pass    # Malformed file probably
-
-    _js_functions = list(js_functions)
-    for js_function in _js_functions:
-        _mock_js_function(js_function)
+def init(path, search_exposed_js=True):
+    global root_path
+    root_path = path
+    if search_exposed_js:
+        js_functions = set()
+        for root, _, files in os.walk(root_path):
+            for name in files:
+                allowed_extensions = '.js .html .txt .htm .xhtml'.split()
+                if not any(name.endswith(ext) for ext in allowed_extensions):
+                    continue
+            
+                try:
+                    with open(os.path.join(root, name), encoding='utf-8') as file:
+                        contents = file.read()
+                        expose_calls = set()
+                        finder = rgx.findall(r'eel\.expose\((.*)\)', contents)
+                        for expose_call in finder:
+                            expose_call = expose_call.strip()
+                            msg = "eel.expose() call contains '(' or '='"
+                            assert rgx.findall(
+                                r'[\(=]', expose_call) == [], msg
+                            expose_calls.add(expose_call)
+                        js_functions.update(expose_calls)
+                except UnicodeDecodeError:
+                    pass  # Malformed file probably
+    
+        _js_functions = list(js_functions)
+        for js_function in _js_functions:
+            _mock_js_function(js_function)
 
 
 def start(*start_urls, **kwargs):
@@ -95,6 +127,7 @@ def start(*start_urls, **kwargs):
     position = kwargs.pop('position', None)
     geometry = kwargs.pop('geometry', {})
     _on_close_callback = kwargs.pop('callback', None)
+    bottle_already_started = kwargs.pop('alive', False)
 
     for k, v in list(_default_options.items()):
         if k not in options:
@@ -108,19 +141,19 @@ def start(*start_urls, **kwargs):
         sock.bind(('localhost', 0))
         options['port'] = sock.getsockname()[1]
         sock.close()
-
-    brw.open(start_urls, options)
     
-    def run_lambda():
-        return btl.run(
-            host=options['host'],
-            port=options['port'],
-            server=wbs.GeventWebSocketServer,
-            quiet=True)
-    if block:
-        run_lambda()
-    else:
-        spawn(run_lambda)
+    if not bottle_already_started:
+        brw.open(start_urls, options)
+        def run_lambda():
+            return btl.run(
+                host=options['host'],
+                port=options['port'],
+                server=wbs.GeventWebSocketServer,
+                quiet=True)
+        if block:
+            run_lambda()
+        else:
+            spawn(run_lambda)
 
 
 def sleep(seconds):
