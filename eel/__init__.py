@@ -228,7 +228,8 @@ def start(*start_urls, **kwargs):
                 host=options['host'],
                 port=options['port'],
                 server=wbs.GeventWebSocketServer,
-                quiet=True)
+                debug=True,
+                quiet=False)
         if block:
             run_lambda()
         else:
