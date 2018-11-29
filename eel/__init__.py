@@ -258,7 +258,7 @@ def _eel():
     return page
 
 @btl.route('/autobridge.js')
-def _eel():
+def _bridge():
     page = build_autobridgejs()
     btl.response.content_type = 'application/javascript'
     return page
