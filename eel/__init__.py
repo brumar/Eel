@@ -128,7 +128,7 @@ def expose(name_or_function=None):
 
 def init(path, search_exposed_js=True, search_into_imports=False):
     global root_path
-    root_path = path
+    root_path = _get_real_path(path)
     if search_exposed_js:
         js_functions = search_in_static_files(root_path)
     
