@@ -17,6 +17,9 @@ import contextlib
 import importlib
 import pkgutil
 from collections import defaultdict
+from functools import partial
+import copy
+
 
 TIME_OUT = 10  # seconds
 _eel_js_file = pkg.resource_filename('eel', 'eel.js')
@@ -76,17 +79,18 @@ def search_in_import(strval):
 def add_to_callers(caller, strval):
     frontend_modules[strval].add(caller)
 
-
+def jscaller(*args, name=""):
+    return _js_call(name, args)
 
 # Public functions
 def new_import(old_import):
+    """block import from frontend. Instead, alias the function to eel._js_call(functionname) 
+    and redirect the import so that this is the function that is really imported"""
     def new_new_import(strval, globs, locs, alist, anumber):
         for imported_function in alist:
             _mock_js_function(imported_function)
-            def func1(*args):
-                return _js_call(imported_function, args)
-            func1.__name__ = imported_function
-            setattr(sys.modules[__name__], imported_function, func1)
+            f = partial(jscaller, name=imported_function)
+            setattr(sys.modules[__name__], imported_function, f) 
             _js_functions.append(imported_function)
         return old_import("eel", globs, locs, alist, anumber)
     return new_new_import
@@ -96,12 +100,10 @@ def new_import(old_import):
 @contextlib.contextmanager
 def import_frontend_functions():
     """
-    - Patch the python import mechanism so that front end python functions are not really imported
-    - Preserves exposing mechanism internal to eel, so that it can continue to communicate with js
-    - Imports the function name into the namespace of the caller, so that my_function() can be directly called
+    Patch the python import mechanism for frontend functions
     """
     global pre_patched_value
-    pre_patched_value = builtins.__import__
+    pre_patched_value = copy.deepcopy(builtins.__import__)
     builtins.__import__ = new_import(pre_patched_value)
     yield "done"
     builtins.__import__ = pre_patched_value
