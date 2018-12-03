@@ -19,6 +19,12 @@ import pkgutil
 from collections import defaultdict
 from functools import partial
 import copy
+import unittest
+import types
+import logging
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
+
+#logger = logging.getLogger("eel")
 
 
 TIME_OUT = 10  # seconds
@@ -43,12 +49,15 @@ _default_options = {
 }
 frontend_modules = defaultdict(set)
 
+NEEDED_PY_FUNCTIONS = []
 BACKEND_NAMES = []
 FRONTEND_FILES = []
+OTHER_IMPORTS= []
 
 import contextlib
 import builtins
 
+#EEL_MAGIC_MOCK = MagicMock()
 
 import re
 
@@ -79,23 +88,56 @@ def search_in_import(strval):
 def add_to_callers(caller, strval):
     frontend_modules[strval].add(caller)
 
-def jscaller(*args, name=""):
-    return _js_call(name, args)
+def jscaller(*args, **kwargs):
+    name = kwargs.pop("name")
+    arglist = list(kwargs.values()) + list(args)
+    return _js_call(name, arglist)
 
 # Public functions
 def new_import(old_import):
     """block import from frontend. Instead, alias the function to eel._js_call(functionname) 
     and redirect the import so that this is the function that is really imported"""
+    # Internally, python may import things at unexpected moment
+    # so be very careful to be wary when adding code in this part
+    # because everything that will be imported, will use our patch
+    # instead of the real importer
     def new_new_import(strval, globs, locs, alist, anumber):
-        for imported_function in alist:
-            _mock_js_function(imported_function)
-            f = partial(jscaller, name=imported_function)
-            setattr(sys.modules[__name__], imported_function, f) 
-            _js_functions.append(imported_function)
-        return old_import("eel", globs, locs, alist, anumber)
+        #logging.info(f"attempt to import from frontend: {strval}, {alist}")
+        global OTHER_IMPORTS
+        OTHER_IMPORTS.append((strval,globs, locs, alist, anumber))
+        if alist is not None:
+            for imported_function in alist:
+                _mock_js_function(imported_function)
+                f = partial(jscaller, name=imported_function)
+                setattr(sys.modules[__name__], imported_function, f)
+                _js_functions.append(imported_function)
+            return old_import("eel", globs, locs, alist, anumber)
+        globs["old_import"] = old_import
+        return old_import(strval, globs, locs, None, anumber)
     return new_new_import
 
 
+
+
+
+def new_import_backend(old_import):
+    """block specific import from backend. Instead, alias the function to eel._js_call(functionname)
+    and redirect the import so that this is the function that is really imported. The backend itself will be
+    imported after this redirection"""
+    # Internally, python may import things at unexpected moment
+    # so be very careful to be wary when adding code in this part
+    # because everything that will be imported, will use our patch
+    # instead of the real importer
+    def new_new_back_import(strval, globs, locs, alist, anumber):
+        logging.info(f"block the backend import {strval} {alist}")
+        #logging.info(strval, alist)
+        if alist:
+            sys.modules["__sink"] = unittest.mock.MagicMock()
+            return old_import("__sink", globs, locs, alist, anumber)
+        else:
+            sys.modules["__sink"] = unittest.mock.MagicMock()
+            return old_import("__sink", globs, locs, None, anumber)
+    return new_new_back_import
 
 @contextlib.contextmanager
 def import_frontend_functions():
@@ -105,10 +147,32 @@ def import_frontend_functions():
     global pre_patched_value
     pre_patched_value = copy.deepcopy(builtins.__import__)
     builtins.__import__ = new_import(pre_patched_value)
+    logging.info("enter frontend patching")
     yield "done"
+    logging.info("leaving frontend patching")
     builtins.__import__ = pre_patched_value
-    import_frontend_functions
+    while(OTHER_IMPORTS):
+        strval, globs, locs, alist, anumber = OTHER_IMPORTS.pop()
+        logging.info(f"simple backend import {strval}")
+        __import__(strval, globs, locs, None, anumber)
+        
 
+@contextlib.contextmanager
+def import_backend_modules(already_imported):
+    """
+    Patch the python import mechanism for frontend functions
+    """
+    if already_imported:
+        global pre_patched_value
+        pre_patched_value = copy.deepcopy(builtins.__import__)
+        builtins.__import__ = new_import_backend(pre_patched_value)
+        logging.info("enter frontend patching")
+        yield "done"
+        logging.info("leaving frontend patching")
+        builtins.__import__ = pre_patched_value
+        import_frontend_functions
+    else:
+        yield "DONE"
 
 def expose(name_or_function=None):
     # Deal with '@eel.expose()' - treat as '@eel.expose'
@@ -145,8 +209,8 @@ def init(path, search_exposed_js=True, search_into_imports=False):
             
     
 def register_backend_names(listofnames):
-    global BACKENDNAMES
-    BACKENDNAMES = listofnames
+    global BACKEND_NAMES
+    BACKEND_NAMES = listofnames
 
 def register_frontend_js_files(filepathlist):
     global FRONTEND_FILES
@@ -155,9 +219,11 @@ def register_frontend_js_files(filepathlist):
 
 def build_autobridgejs():
     lines = []
-    for backend_name in BACKENDNAMES:
+    for backend_name in BACKEND_NAMES:
         lines.append(f"window.{backend_name} = eel;")
     for frontfilepath in FRONTEND_FILES:
+        if frontfilepath.startswith("./web/"):
+            frontfilepath = frontfilepath.replace("./web/", "./")
         if frontfilepath.startswith("./web"):
             frontfilepath = frontfilepath.replace("./web", "./")
         if frontfilepath.startswith("/web"):
@@ -230,7 +296,7 @@ def start(*start_urls, **kwargs):
                 host=options['host'],
                 port=options['port'],
                 server=wbs.GeventWebSocketServer,
-                debug=True,
+                debug=False,
                 quiet=False)
         if block:
             run_lambda()
@@ -306,16 +372,47 @@ def _repeated_send(ws, msg):
         try:
             ws.send(msg)
             break
-        except Exception:
+        except Exception as e:
+            logging.exception("exception")
             sleep(0.001)
+    else:
+        logging.error(f"unable to send this message {str(msg)}")
+        _debug_health_check()
+
+accumulators = defaultdict(list)
+
+def call_debug_eel():
+    for _, ws in _websockets:
+        _repeated_send(ws, jsn.dumps({  'debug': "debug",
+                                    'value': return_val}))
+    
 
 
 def _process_message(message, ws):
+    global accumulators
     if 'call' in message:
+        # from python to js
         return_val = _exposed_functions[message['name']](*message['args'])
-        _repeated_send(ws, jsn.dumps({  'return': message['call'],
-                                        'value': return_val    })) 
+        # IMPORTANT listing values from python generator provoques
+        # a blocking type. One should better use accumulator like in the js side
+        if isinstance(return_val, types.GeneratorType):
+            previous_result = next(return_val);
+            iterator_ended = False
+            while not iterator_ended :
+                try:
+                    result = next(return_val)
+                except StopIteration:
+                    iterator_ended = True
+                finally:
+                    _repeated_send(ws, jsn.dumps({'return': message["call"],
+                                                    'value': previous_result,
+                                                     'continue': not iterator_ended}));
+                previous_result = result
+        else:
+            _repeated_send(ws, jsn.dumps({  'return': message['call'],
+                                        'value': return_val    }))
     elif 'return' in message:
+        # from js to python
         call_id = message['return']
         generator = "continue" in message.keys()
         docontinue = generator and message["continue"]!=False
@@ -330,9 +427,18 @@ def _process_message(message, ws):
                 callback = _call_return_callbacks[call_id]
                 callback(message['value'])
         else:
-            _call_return_values[call_id] = message['value']
+            # todo => checkifthis works in eelcloned
+            # check if it blocks everything or not
+            if generator:
+                if docontinue:
+                    accumulators[call_id].append(message["value"])
+                else:
+                    _call_return_values[call_id] = accumulators.pop(call_id)
+            else:
+                _call_return_values[call_id] = message["value"]
     else:
-        print('Invalid message received: ', message)
+        logging.error('Invalid message received: ', message)
+        _debug_health_check()
 
 
 def _get_real_path(path):
@@ -365,8 +471,6 @@ def _call_object(name, args):
 
 
 def _mock_call(name, args):
-    #print("mock call")
-    #print(name, args)
     call_object = _call_object(name, args)
     global _mock_queue
     _mock_queue += [call_object]
@@ -374,8 +478,8 @@ def _mock_call(name, args):
 
 
 def _js_call(name, args):
-    #print("js call")
-    #print(name, args)
+    #logging.info("js call")
+    #logging.info(name, args)
     call_object = _call_object(name, args)
     for _, ws in _websockets:
         _repeated_send(ws, jsn.dumps(call_object))
@@ -396,7 +500,7 @@ def _call_return(call):
                 sleep(0.001)
                 index += 0.001
                 if index >= TIME_OUT:
-                    print("time out")
+                    logging.error(f"timed out. No answer from javascript. call_id {call_id}")
                     break
     return return_func
 
@@ -408,11 +512,30 @@ def _expose(name, function):
 
 
 def _websocket_close(page):
-    print("close detected")
+    logging.error("sockets unresponsive. The system would like to exit")
+    _debug_health_check()
     if _on_close_callback is not None:
         sockets = [p for _, p in _websockets]
         _on_close_callback(page, sockets)
+        logging.warning("_on_close_callback is called")
     else:
         sleep(1.0)
         if len(_websockets) == 0:
+            logging.error("The system has exited")
             sys.exit()
+
+def _debug_health_check():
+    logging.info("list of python exposed function")
+    for f in _exposed_functions:
+        logging.info(f"    {f}")
+    logging.info("list of known js functions")
+    for f in _js_functions:
+        logging.info(f"    {f}")
+    logging.info("list of known BACKEND Files")
+    for b in BACKEND_NAMES:
+        logging.info(f"    {b}")
+    logging.info("list of known FRONT END Files")
+    for f in FRONTEND_FILES:
+        logging.info(f"    {f}")
+    #v = _js_call("_debug",tuple("debug"))()
+    #logging.info(v)

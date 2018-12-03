@@ -30,9 +30,11 @@ eel = {
 
     // These get dynamically added by library when file is served
     /** _py_functions **/
+    /** _js_list_functions **/
     /** _start_geometry **/
 
     _exposed_functions: {},
+    _accumulators: {},
 
     _mock_queue: [],
 
@@ -133,12 +135,13 @@ eel = {
 
             eel._websocket.onmessage = function (e) {
                 let message = JSON.parse(e.data);
+                debugger;
+                console.log(message)
                 if(message.hasOwnProperty('call') ) {
                     // Python making a function call into us
                     if(message.name in eel._exposed_functions) {
                         let return_val_or_promise_or_generator = eel._exposed_functions[message.name](...message.args);
-			if (return_val_or_promise_or_generator !== undefined){
-                            if (return_val_or_promise_or_generator.next !== undefined){
+                            if ((return_val_or_promise_or_generator !== undefined)&&(return_val_or_promise_or_generator.next !== undefined)){
                                 // this is a generator
                                 it = return_val_or_promise_or_generator
                                 let previous_result = it.next();
@@ -153,16 +156,39 @@ eel = {
                                 return_val_or_promise = return_val_or_promise_or_generator
                                 Promise.resolve(return_val_or_promise).then(function(value) {
                                     eel._websocket.send(eel._toJSON({'return': message.call, 'value': value}));
-                                    })
-				}
+                                })
                             }
                         }
                     } else if(message.hasOwnProperty('return')) {
                         // Python returning a value to us
-                        if(message['return'] in eel._call_return_callbacks) {
-                            eel._call_return_callbacks[message['return']](message.value);
+
+                        if (message.hasOwnProperty('continue')){
+                            // this is a generator
+                            let caller = message["return"];
+                            if (eel._accumulators[caller] === undefined){
+                                eel._accumulators[caller] = [];
+                            }
+                            eel._accumulators[caller].push(message.value)
+                            if (message.continue === false){
+                                returnval = eel._accumulators[caller]
+                                delete eel._accumulators[caller]
+                                if(message['return'] in eel._call_return_callbacks) {
+                                    eel._call_return_callbacks[message['return']](returnval);
+                                }
+                            }
                         }
-                    } else {
+                        else{
+                            if(message['return'] in eel._call_return_callbacks) {
+                                eel._call_return_callbacks[message['return']](message.value);
+                            }
+                        }
+                    }
+                     else if(message.hasOwnProperty("debug")){
+                     console.log(_exposed_functions)
+                     console.log(this)
+                      //eel._websocket.send(eel._toJSON({'debug': message.call, 'value': [null]}));
+                     }
+                    else {
                         throw 'Invalid message ' + message;
                     }
 
@@ -172,3 +198,4 @@ eel = {
 }
 
 eel._init();
+
